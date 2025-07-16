@@ -1,4 +1,5 @@
 /node_modules
-env
+.env
 frames
 output.mp4
+/dist
