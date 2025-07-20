@@ -1,6 +1,6 @@
 // import type { Request, Response } from "express";
 import express, { Request, Response } from "express";
-import puppeteer from "puppeteer";
+import puppeteer, { Browser } from "puppeteer";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
@@ -163,7 +163,6 @@ class GoogleAudioGen {
   }
 }
 const PORT = process.env.PORT || 8080;
-
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -178,137 +177,171 @@ const HEIGHT = 1920;
 const FRAME_COUNT = FPS * DURATION_SECONDS;
 const FRAME_DIR = path.join(__dirname, "frames");
 
-async function generateFullVideoHook() {
-  if (!fs.existsSync(FRAME_DIR)) fs.mkdirSync(FRAME_DIR);
-  const t1 = performance.now();
-  const browser = await puppeteer.launch({
-    headless: true,
-    defaultViewport: { width: WIDTH, height: HEIGHT },
-    args: ["--autoplay-policy=no-user-gesture-required"],
-  });
-
-  const page = await browser.newPage();
-  await page.goto(`file://${__dirname}/index.html`);
-
-  // Wait for video to load
-  await page.waitForSelector("video");
-
-  // Get video duration
-  const videoDuration = await page.evaluate(() => {
-    const vid = document.querySelector("video");
-    return new Promise((resolve) => {
-      if (vid.readyState >= 1) {
-        resolve(vid.duration);
-      } else {
-        vid.addEventListener("loadedmetadata", () => resolve(vid.duration));
+async function generateFullVideoHook({
+  voiceover,
+  html,
+}: {
+  voiceover: {
+    audioBuffer: Buffer<ArrayBufferLike>;
+    fileExtension: string;
+  };
+  html: string;
+}) {
+  let browser: Browser | null;
+  const retries = 3; // Number of retries for launching Puppeteer
+  try {
+    if (!fs.existsSync(FRAME_DIR)) fs.mkdirSync(FRAME_DIR);
+    const t1 = performance.now();
+    for (let i = 0; i < retries; i++) {
+      try {
+        browser = await puppeteer.launch({
+          headless: true,
+          defaultViewport: { width: WIDTH, height: HEIGHT },
+          args: ["--autoplay-policy=no-user-gesture-required", "--disable-gpu"],
+        });
+        console.log(`Puppeteer launched successfully on attempt ${i + 1}`);
+        break; // Exit loop if launch is successful
+      } catch (error) {
+        console.error(`Attempt ${i + 1} to launch Puppeteer failed:`, error);
+        if (i === retries - 1) {
+          throw new Error(
+            "Failed to launch Puppeteer after multiple attempts."
+          );
+        }
       }
-    });
-  });
+    }
 
-  console.log(`📹 Video duration: ${videoDuration} seconds`);
+    const page = await browser.newPage();
+    console.log("Opended new page");
+    await page.setContent(html);
+    console.log("Set HTML content");
+    // Wait for video to load
+    await page.waitForSelector("video");
+    await page.goto("file://" + path.join(__dirname, "73.mp4"));
+    console.log("Waiting for video to load...");
 
-  // Calculate time per frame
-  const timePerFrame = Number(videoDuration) / FRAME_COUNT;
-
-  for (let i = 0; i < FRAME_COUNT; i++) {
-    const frameNum = String(i).padStart(4, "0");
-    const currentTime = i * timePerFrame;
-
-    // Set video to specific time
-    await page.evaluate((time) => {
-      const vid = document.querySelector("video");
-      vid.currentTime = time;
-    }, currentTime);
-
-    // Wait for the video to seek to the correct time
-    await page.evaluate(() => {
+    // Get video duration
+    const videoDuration = await page.evaluate(() => {
       const vid = document.querySelector("video");
       return new Promise((resolve) => {
-        if (vid.readyState >= 2) {
-          resolve("");
+        if (vid.readyState >= 1) {
+          resolve(vid.duration);
         } else {
-          vid.addEventListener("canplay", resolve, { once: true });
+          vid.addEventListener("loadedmetadata", () => resolve(vid.duration));
         }
       });
     });
 
-    // Small delay to ensure frame is rendered
-    await new Promise((resolve) => {
-      setTimeout(() => {
-        resolve("");
-      }, 50);
-    });
+    console.log(`📹 Video duration: ${videoDuration} seconds`);
 
-    await page.screenshot({ path: `${FRAME_DIR}/frame_${frameNum}.png` });
+    // Calculate time per frame
+    const timePerFrame = Number(videoDuration) / FRAME_COUNT;
 
-    console.log(
-      `📸 Captured frame ${i + 1}/${FRAME_COUNT} at ${currentTime.toFixed(2)}s`
-    );
-  }
+    for (let i = 0; i < FRAME_COUNT; i++) {
+      const frameNum = String(i).padStart(4, "0");
+      const currentTime = i * timePerFrame;
 
-  await browser.close();
-  console.log("✅ Captured frames. Now encoding video...");
+      // Set video to specific time
+      await page.evaluate((time) => {
+        const vid = document.querySelector("video");
+        vid.currentTime = time;
+      }, currentTime);
 
-  execSync(
-    `ffmpeg -y -framerate ${FPS} -i ${FRAME_DIR}/frame_%04d.png -pix_fmt yuv420p output.mp4`,
-    {
-      stdio: "inherit",
+      // Wait for the video to seek to the correct time
+      await page.evaluate(() => {
+        const vid = document.querySelector("video");
+        return new Promise((resolve) => {
+          if (vid.readyState >= 2) {
+            resolve("");
+          } else {
+            vid.addEventListener("canplay", resolve, { once: true });
+          }
+        });
+      });
+
+      // Small delay to ensure frame is rendered
+      await new Promise((resolve) => {
+        setTimeout(() => {
+          resolve("");
+        }, 50);
+      });
+
+      await page.screenshot({ path: `${FRAME_DIR}/frame_${frameNum}.png` });
+
+      console.log(
+        `📸 Captured frame ${i + 1}/${FRAME_COUNT} at ${currentTime.toFixed(
+          2
+        )}s`
+      );
     }
-  );
 
-  // Clean up: delete frames directory and its contents
-  try {
-    fs.readdirSync(FRAME_DIR).forEach((file) => {
-      fs.unlinkSync(path.join(FRAME_DIR, file));
-    });
-    fs.rmdirSync(FRAME_DIR);
-    console.log("🧹 Cleaned up frames directory.");
-  } catch (cleanupErr) {
-    console.error("Error cleaning up frames directory:", cleanupErr);
+    await browser.close();
+    console.log("✅ Captured frames. Now encoding video...");
+
+    // Step 1: Encode video from frames
+    execSync(
+      `ffmpeg -y -framerate ${FPS} -i ${FRAME_DIR}/frame_%04d.png -pix_fmt yuv420p temp_output.mp4`,
+      {
+        stdio: "inherit",
+      }
+    );
+
+    // Step 2: Save the voiceover audio to a file
+    const audioFileName = `voiceover.${voiceover.fileExtension || "wav"}`;
+    fs.writeFileSync(audioFileName, voiceover.audioBuffer);
+
+    // Step 3: Combine video and audio into final output
+    execSync(
+      `ffmpeg -y -i temp_output.mp4 -i ${audioFileName} -c:v copy -c:a aac -shortest output.mp4`,
+      {
+        stdio: "inherit",
+      }
+    );
+
+    // Clean up: delete frames directory and its contents
+    try {
+      fs.readdirSync(FRAME_DIR).forEach((file) => {
+        fs.unlinkSync(path.join(FRAME_DIR, file));
+      });
+      fs.rmdirSync(FRAME_DIR);
+      if (fs.existsSync("temp_output.mp4")) fs.unlinkSync("temp_output.mp4");
+      if (fs.existsSync(audioFileName)) fs.unlinkSync(audioFileName);
+      console.log("🧹 Cleaned up frames and temp files.");
+    } catch (cleanupErr) {
+      console.error("Error cleaning up frames directory:", cleanupErr);
+    }
+
+    console.log("🎬 Video created: output.mp4");
+    const t2 = performance.now();
+    console.log("Render time: ", t2 - t1, "ms");
+  } catch (error) {
+    console.error("generateFullVideoHook() ---> ", error.message);
+    throw error;
+  } finally {
+    browser?.close();
   }
-
-  console.log("🎬 Video created: output.mp4");
-  const t2 = performance.now();
-  console.log("Render time: ", t2 - t1, "ms");
 }
 
-app.get("/generate/voiceover", async (req, res) => {
+app.get("/generate/full-video", async (req, res) => {
   try {
-    console.log("Received voiceover req");
-    const { audioBuffer, fileExtension } = await generateAudioVoiceover({
-      script: "This is a sample script for the video hook.",
-    });
-    if (!audioBuffer) {
-      return res.status(500).send("Failed to generate audio");
+    console.log("Received Video Gen Req");
+    const { hook, overlay } = await generateHookScript();
+    if (!hook || !overlay) {
+      console.error("Script or Overlay Missing");
+      return res.status(500).send("Script or Overlay Missing");
     }
-    res.setHeader("Content-Type", `audio/${fileExtension || "wav"}`);
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="voiceover.${fileExtension || "wav"}"`
-    );
-    return res.send(audioBuffer);
+    const voiceover = await generateAudioVoiceover({
+      script: hook,
+    });
+    const htmlContent = await generateHTML({ overlay });
+    const video = await generateFullVideoHook({
+      html: htmlContent,
+      voiceover,
+    });
+    return res.json({ message: "success" });
   } catch (error) {
-    console.error(`Error generating audio voiceover:`, error.message);
-    return res.status(500).send("Error generating audio voiceover");
-  }
-});
-app.get("/generate/script", async (req, res) => {
-  try {
-    const script = await generateHookScript();
-    res.json({ script }).status(200);
-  } catch (error) {
-    console.error(error.message);
-    res.sendStatus(500).send(error.message);
-  }
-});
-app.get("/generate/video", async (req, res) => {
-  try {
-    console.log("Received video generation request");
-    await generateFullVideoHook();
-    res.sendStatus(200);
-  } catch (error) {
-    console.error(error.message);
-    res.sendStatus(500);
+    console.error(`Error generating full video:`, error.message);
+    return res.status(500).send("Error generating full video");
   }
 });
 
@@ -321,12 +354,94 @@ async function generateAudioVoiceover({ script }: { script?: string }) {
     throw error.message;
   }
 }
+async function generateHTML({ overlay }: { overlay: string }) {
+  return `
+    <!DOCTYPE html>
+<html lang="en">
+<head>
+  <style>
+    :root {
+      --bg-color: hsl(49 37% 94%);
+      --typewriterSpeed: 6s;
+      --typewriterCharacters: 24;
+    }
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: black;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      width: 1080px;
+      height: 1920px;
+      position: relative;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
 
-async function generateHTML({ overlay }) {
-  try {
-  } catch (error) {
-    console.error(`generateHTML() error -->`, error.message);
-  }
+    h1 {
+      text-shadow: -8px 5px 0px black;
+      -webkit-text-stroke: 5px black;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 6rem;
+      width: max-content;
+      text-align: center;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <video src="../73.mp4" autoplay muted loop></video>
+    <div class="overlay">
+      <h1 id="app"></h1>
+    </div>
+  </div>
+  <script src="https://unpkg.com/typewriter-effect@latest/dist/core.js"></script>
+
+  <script>
+    var app = document.getElementById("app");
+
+    var typewriter = new Typewriter(app, {
+      loop: false,
+      delay: 80,
+    });
+
+    typewriter.pauseFor(200)
+    ${overlay
+      .split(" ")
+      .map(
+        (word, index, arr) =>
+          `.typeString("${word}")${
+            index < arr.length - 1 ? ".pauseFor(1000)" : ""
+          }`
+      )
+      .join("\n      ")}
+    .start();
+  </script>
+</body>
+</html>
+
+  `;
 }
 async function generateHookScript() {
   try {
@@ -486,7 +601,7 @@ async function generateHookScript() {
       ],
     });
     const rawContent = response.candidates[0].content.parts[0].text;
-    const content = JSON.parse(rawContent);
+    const content: { hook: string; overlay: string } = JSON.parse(rawContent);
     return content;
   } catch (error) {
     console.error(`generateHookScript() error -->`, error.message);
