@@ -213,13 +213,15 @@ async function generateFullVideoHook({
 
     const page = await browser.newPage();
     console.log("Opended new page");
-    await page.setContent(html);
-    console.log("Set HTML content");
-    // Wait for video to load
-    await page.waitForSelector("video");
-    await page.goto("file://" + path.join(__dirname, "73.mp4"));
-    console.log("Waiting for video to load...");
+    // await page.setContent(html);
+    // console.log("Set HTML content");
+    // // Wait for video to load
+    // await page.waitForSelector("video");
+    // console.log("Video Loaded");
 
+    await page.goto(
+      "file:///C:/Users/ACER/Desktop/Software/video-hook-gen/dist/index.html"
+    );
     // Get video duration
     const videoDuration = await page.evaluate(() => {
       const vid = document.querySelector("video");
@@ -355,7 +357,7 @@ async function generateAudioVoiceover({ script }: { script?: string }) {
   }
 }
 async function generateHTML({ overlay }: { overlay: string }) {
-  return `
+  const html = `
     <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -442,6 +444,7 @@ async function generateHTML({ overlay }: { overlay: string }) {
 </html>
 
   `;
+  return html.replace(/\s+/g, " ").trim(); // Minify HTML
 }
 async function generateHookScript() {
   try {
